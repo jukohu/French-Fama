@@ -47,7 +47,6 @@ def read_kf_monthly(path):
     # Read raw lines 
     with open(path, "r", encoding="latin-1") as f:
         lines = f.readlines()
-
     # Find the first monthly data row (YYYYMM,...)
     start_data = None
     for i, ln in enumerate(lines):
@@ -56,10 +55,8 @@ def read_kf_monthly(path):
             break
     if start_data is None:
         raise ValueError("Could not find a YYYYMM data row.")
-
     # The header line is usually right above the first data row
     header_idx = start_data - 1
-
     # Find the end of the monthly block (until a blank/new section line)
     end_data = None
     for j in range(start_data, len(lines)):
@@ -73,18 +70,15 @@ def read_kf_monthly(path):
             break
     if end_data is None:
         end_data = len(lines)
-
     # Build a clean CSV (header + data rows only)
     csv_block = "".join([lines[header_idx]] + lines[start_data:end_data])
     df = pd.read_csv(io.StringIO(csv_block), engine="python")
     df.columns = [c.strip() for c in df.columns]
-
     # Normalize date and index
     if "Date" not in df.columns:
         df = df.rename(columns={df.columns[0]: "Date"})
     df["Date"] = pd.to_datetime(df["Date"].astype(str), format="%Y%m")
     df = df.set_index("Date").sort_index()
-
     return df
 
 # usage
@@ -330,8 +324,7 @@ def trade_evaluation(signals_df):
           entry_portfolio_holding = row['Portfolio Total']
           share_size = row['Entry/Exit Position']
           entry_share_price = row['GOOGL_Price_EUR']
-
-      elif row['Entry/Exit'] == -1:
+        elif row['Entry/Exit'] == -1:
           exit_date = index
           exit_portfolio_holding = abs(row['Portfolio Total'])
           exit_share_price = row['GOOGL_Price_EUR']
