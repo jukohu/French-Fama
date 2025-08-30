@@ -1,24 +1,30 @@
-## The French Fama 3-Factor Model
 
-This little project attempts to practice my coding skills in python with an application highly relevant to quantative investing, an area I am increasingly interested in. 
+## Fama–French 3-Factor Model (Alphabet case study)
 
-The French Fama (1992) model similarly to the CAPM attempts to explain stock returns by building a regression model on different factors. The three factors of the french fama model are market excess return, outperformance of small versus large companies based on market capitalization and outperformance of high book/market versus low book/market companies. 
+This mini-project practices Python workflow on a topic that’s highly relevant to **quantitative investing**.
+
+The **Fama–French (1993) 3-factor model** extends CAPM by explaining stock (excess) returns with three systematic factors:
+
+1. **Market excess return** $(R_m - R_f)$
+2. **SMB** (*Small Minus Big*): small-cap minus large-cap outperformance
+3. **HML** (*High Minus Low*): value (high book/market) minus growth (low book/market) outperformance
+
+Model (total return form):
 
 $$
 r = R_f + \beta\,(R_m - R_f) + b_s\,\mathrm{SMB} + b_v\,\mathrm{HML} + \alpha
 $$
 
-French Fama find that those three factors explain 90% of all portfolio's returns in contrast to 70% for the CAPM. 
+In many datasets, these factors explain substantially more variation in returns than CAPM.
 
+In this project, I use Fama–French factors to **explain and (simply) predict** Alphabet’s monthly returns. Parts of the structure are inspired by *fischerleben’s* “Algorithmic Trading Project”.
 
-In this project I will use the French Fama model to explain and predict Alphabet's stock returns. My proeject and the code is inspired and partially copied from fischerleben's project titled "Algorithmic Trading Project".
+---
 
+## Setup
 
-
-
-
-Let's start this project by importing all necessary libraries for this project:
-# Initial Imports:
+```python
+# Initial imports
 import pandas as pd
 import numpy as np
 from pathlib import Path
@@ -26,77 +32,73 @@ from datetime import datetime
 import warnings
 warnings.filterwarnings('ignore')
 
-# To run models:
+# Modeling
 import statsmodels.api as sm
-from sklearn.ensemble import RandomForestClassifier
-from sklearn.datasets import make_classification
-from joblib import dump, load
+from sklearn.linear_model import LinearRegression
 
-# For visualizations:
+# Visualization
 import matplotlib.pyplot as plt
-import seaborn as sns
-%pylab inline
-%matplotlib inline
+# %matplotlib inline  # uncomment in a notebook
+```
 
-To estimate Alphabet's stock returns with the French Fama specification, we need data on the three factors. I took the historic monthly data from the French Fama website and imported them in the following:
+---
 
+## Load Fama–French monthly factors
+
+Ken French CSVs include preamble/footer text, so we extract the actual monthly block safely.
+
+```python
 import re, io
-import pandas as pd
 
 def read_kf_monthly(path):
-    # Read raw lines 
+    # Read raw lines (Ken French often uses latin-1)
     with open(path, "r", encoding="latin-1") as f:
         lines = f.readlines()
-    # Find the first monthly data row (YYYYMM,...)
-    start_data = None
-    for i, ln in enumerate(lines):
-        if re.match(r"^\s*\d{6}\s*,", ln):
-            start_data = i
-            break
-    if start_data is None:
+
+    # Find first monthly data row: YYYYMM,...
+    start = next((i for i, ln in enumerate(lines) if re.match(r"^\s*\d{6}\s*,", ln)), None)
+    if start is None:
         raise ValueError("Could not find a YYYYMM data row.")
-    # The header line is usually right above the first data row
-    header_idx = start_data - 1
-    # Find the end of the monthly block (until a blank/new section line)
-    end_data = None
-    for j in range(start_data, len(lines)):
-        # stop when the line is not a YYYYMM row anymore and not empty continuation
-        if not re.match(r"^\s*\d{6}\s*,", lines[j]) and lines[j].strip() != "":
-            end_data = j
+    header = start - 1
+
+    # Find end of the monthly block (blank/new section)
+    end = None
+    for j in range(start, len(lines)):
+        if lines[j].strip() == "" or re.search(r"\b(Annual|Weekly|Daily)\b", lines[j]):
+            end = j
             break
-        # or stop on a completely blank line (before Annual/Daily sections)
-        if lines[j].strip() == "":
-            end_data = j
-            break
-    if end_data is None:
-        end_data = len(lines)
-    # Build a clean CSV (header + data rows only)
-    csv_block = "".join([lines[header_idx]] + lines[start_data:end_data])
+    end = len(lines) if end is None else end
+
+    csv_block = "".join([lines[header]] + lines[start:end])
     df = pd.read_csv(io.StringIO(csv_block), engine="python")
     df.columns = [c.strip() for c in df.columns]
+
     # Normalize date and index
     if "Date" not in df.columns:
         df = df.rename(columns={df.columns[0]: "Date"})
     df["Date"] = pd.to_datetime(df["Date"].astype(str), format="%Y%m")
     df = df.set_index("Date").sort_index()
+
     return df
 
-# usage
 french = read_kf_monthly("F-F_Research_Data_Factors.csv")
-print(french.head())
+french.head()
+```
 
-Now, I would like to regress Alphabet's monthly stock returns against our factors, so I am importing google's monthly stock prices in Euro. 
+> Note: Fama–French columns are usually in **percent**; we’ll convert to decimals later.
+
+---
+
+## Load Alphabet monthly prices (EUR) and merge
+
+```python
+# Load your Excel (sheet with monthly data)
 alphabet = pd.read_excel("Alphabet Inc._StockChart_08_29_2025.xlsx", sheet_name="Data")
-alphabet.head()
-Next, I merge the two data frames:
-import pandas as pd
 
-# --- Ensure Fama–French is monthly-indexed ---
+# Clean & align to monthly PeriodIndex
 ff = french.copy()
-ff.index = pd.to_datetime(ff.index)
-ff.index = ff.index.to_period("M")   # YYYY-MM monthly period
+ff.index = ff.index.to_period("M")  # YYYY-MM
 
-# --- Clean & index the Alphabet data ---
 alphabet_clean = (
     alphabet.rename(columns={
         "Pricing Date": "Date",
@@ -107,279 +109,202 @@ alphabet_clean = (
     .set_index("Date")
     .sort_index()
 )
-
-# Convert to monthly period index and ensure one row per month
 alphabet_clean.index = alphabet_clean.index.to_period("M")
 alphabet_clean = alphabet_clean[~alphabet_clean.index.duplicated(keep="last")]
 
-# --- Join on the monthly index ---
-combined_df = ff.join(alphabet_clean[["GOOGL_Price_EUR", "GOOGL_Volume"]], how="inner")
+# Merge (inner) on monthly period
+combined_df = ff.join(alphabet_clean[["GOOGL_Price_EUR"]], how="inner")
 
-# Drop RF if you don't need it
-combined_df = combined_df.drop(columns=["GOOGL_Volume"])
+# Convert FF factors to decimals if they look like percents
+for col in ["Mkt-RF","SMB","HML","RF"]:
+    if col in combined_df.columns and combined_df[col].abs().max() > 1:
+        combined_df[col] = combined_df[col] / 100.0
 
-# Preview
 combined_df.head()
+```
 
-Here I convert Alphabet's monthly stock prices into monthly returns:
+---
 
-# make sure we're sorted by month
+## Compute Alphabet monthly returns
+
+```python
 combined_df = combined_df.sort_index()
-
-# simple arithmetic monthly return from month-end prices
 combined_df["GOOGL_Ret"] = combined_df["GOOGL_Price_EUR"].astype(float).pct_change()
-
-# drop the first NaN return row if you like
 combined_df = combined_df.dropna(subset=["GOOGL_Ret"])
-
 combined_df.head()
+```
 
-Two build the model I define my Y and X variables. My Y variable is clearly Alphabet's stock returns why my X variables or predictors are the French Fama factors. 
-# Define X and y variables:
-X = combined_df.drop('GOOGL_Ret', axis=1)
-X = X.drop('GOOGL_Price_EUR',axis=1)
-y = combined_df.loc[:, 'GOOGL_Ret']
-Then, I split my data into a training data set which is 80% of the total data frame and a test data set which is the remaining 20% of the data frame. That way I can use the model trained on the 80% of the model to test it on the remaining 20%. Moreover, I can use the model to build a trading algorithm that I can then use on teh 20% to test. 
-# Split into Training/Testing Data:
+---
+
+## Train / test split
+
+```python
+X = combined_df.drop(columns=["GOOGL_Ret","GOOGL_Price_EUR"])
+y = combined_df["GOOGL_Ret"]
+
 split = int(0.8 * len(X))
-X_train = X[: split]
-X_test = X[split:]
-y_train = y[: split]
-y_test = y[split:]
-price_test=combined_df["GOOGL_Price_EUR"][split:]
-price_test
-Here the model is specified. I use the classical OLS linear regression model to regress Alphabet's stock returns onto the French Fama factors. This model is then used to make stock return predictions based on the French Fama Factors in the test data set. 
-# Import Linear Regression Model from SKLearn:
-from sklearn.linear_model import LinearRegression
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
+price_test = combined_df["GOOGL_Price_EUR"][split:]
+```
 
-# Create, train, and predict model:
+---
+
+## OLS (scikit-learn) and predictions
+
+```python
 lin_reg_model = LinearRegression(fit_intercept=True)
-lin_reg_model = lin_reg_model.fit(X_train, y_train)
-predictions = lin_reg_model.predict(X_test)
-# Convert y_test to a dataframe:
-y_test = y_test.to_frame()
-The Predictions based on the French Fama model can then be compared to the actual stock returns. This can serve as a signal for buying or selling. If the predicted returns are higher than the actual returns, then this is a signal to buy, assuming that your own predictions are not priced in yet. Contrarely, if your prediction is lower than actual returns it's a sign sell. This is a only long strategy. Other specifications could look at short selling as well. 
-signals_df = y_test.copy()
+lin_reg_model.fit(X_train, y_train)
+predictions = pd.Series(lin_reg_model.predict(X_test), index=X_test.index, name="Pred")
+```
 
-# Add "predictions" to dataframe:
-y_test['Predictions'] = predictions
-y_test["GOOGL_Price_EUR"]=price_test
+---
 
-# Add "Buy Signal" column based on whether day's predictions were greater than the day's actual returns:
-y_test['Buy Signal'] = np.where(y_test['Predictions'] > y_test['GOOGL_Ret'], 1.0,0.0)
+## Signals (no look-ahead; long-only)
 
-# Drop nulls:
-y_test=y_test.dropna()
+A safer rule converts the forecast to a **binary position** using **only information at time *t*** and **trades at *t+1***.
+Here: go long if predicted **excess** return > 0 (or > small cost).
 
-y_test.head()
-The following code creates and algorithm that trades alphabet stocks based on the signals from the prediction models and looks at the portfolio's performance. 
-# Define function to generate signals dataframe for algorithm:
-def generate_signals(input_df, start_capital=100000, share_count=2000):
-  # Set initial capital:
-  initial_capital = float(start_capital)
+```python
+y_test_df = y_test.to_frame(name="GOOGL_Ret").copy()
+y_test_df["GOOGL_Price_EUR"] = price_test
+y_test_df = y_test_df.join(predictions)
 
-  signals_df = input_df.copy()
+# If RF exists, define predicted excess return; else just use Pred
+pred_excess = y_test_df["Pred"] - (X_test["RF"] if "RF" in X_test.columns else 0.0)
 
-  # Set the share size:
-  share_size = share_count
+# Raw signal at time t
+y_test_df["Buy_Signal_raw"] = (pred_excess > 0.0).astype(float)
 
-  # Take a 500 share position where the Buy Signal is 1 (prior day's predictions greater than prior day's returns):
-  signals_df['Position'] = share_size * signals_df['Buy Signal']
+# Execute next period to avoid look-ahead
+y_test_df["Buy_Signal"] = y_test_df["Buy_Signal_raw"].shift(1).fillna(0)
+y_test_df.head()
+```
 
-  # Make Entry / Exit Column:
-  signals_df['Entry/Exit']=signals_df["Buy Signal"].diff()
+---
 
-  # Find the points in time where a 500 share position is bought or sold:
-  signals_df['Entry/Exit Position'] = signals_df['Position'].diff()
+## Backtest: position, P\&L, equity curve (monthly)
 
-  # Multiply share price by entry/exit positions and get the cumulative sum:
-  signals_df['Portfolio Holdings'] = signals_df['GOOGL_Price_EUR'] * signals_df['Entry/Exit Position'].cumsum()
+```python
+def generate_signals(input_df, start_capital=100_000, share_count=2_000):
+    df = input_df.copy().sort_index()
 
-  # Subtract the initial capital by the portfolio holdings to get the amount of liquid cash in the portfolio:
-  signals_df['Portfolio Cash'] = initial_capital - (signals_df['GOOGL_Price_EUR'] * signals_df['Entry/Exit Position']).cumsum()
+    share_size = share_count
+    df["Position"] = share_size * df["Buy_Signal"]
+    df["Entry/Exit"] = df["Buy_Signal"].diff().fillna(0.0)
+    df["Entry/Exit Position"] = df["Position"].diff().fillna(0.0)
 
-  # Get the total portfolio value by adding the cash amount by the portfolio holdings (or investments):
-  signals_df['Portfolio Total'] = signals_df['Portfolio Cash'] + signals_df['Portfolio Holdings']
+    # Holdings & cash
+    df["Holdings"] = df["Entry/Exit Position"].cumsum() * df["GOOGL_Price_EUR"]
+    df["Cash"] = start_capital - (df["GOOGL_Price_EUR"] * df["Entry/Exit Position"]).cumsum()
 
-  # Calculate the portfolio daily returns:
-  signals_df['Portfolio Daily Returns'] = signals_df['Portfolio Total'].pct_change()
+    df["Total"] = df["Cash"] + df["Holdings"]
+    df["Period_Return"] = df["Total"].pct_change()
+    df["Cumulative_Return"] = (1 + df["Period_Return"]).cumprod() - 1
 
-  # Calculate the cumulative returns:
-  signals_df['Portfolio Cumulative Returns'] = (1 + signals_df['Portfolio Daily Returns']).cumprod() - 1
+    return df.dropna(subset=["Period_Return"])
 
-  signals_df = signals_df.dropna()
-  
-  return signals_df
-The following data frame shows the portfolio development over time, including entry and exit from the alphabet, the portfolio's cash position, the portfolio's total value, daily return and cumulative returns. 
-# Generate and view signals dataframe using generate signals function
-signals_df=generate_signals(y_test)
+signals_df = generate_signals(y_test_df)
 signals_df.head(10)
-The following calculates the portfolio's anual return, cumulative returns, annual volatiliy, sharpe ratio and sortino ratio. By portfolio I mean the portfolio that follows the trading algorithm
-def algo_evaluation(signals_df):
-  # Prepare dataframe for metrics
-  metrics = [
-      'Annual Return',
-      'Cumulative Returns',
-      'Annual Volatility',
-      'Sharpe Ratio',
-      'Sortino Ratio']
+```
 
-  columns = ['Backtest']
+---
 
-  # Initialize the DataFrame with index set to evaluation metrics and column as `Backtest` (just like PyFolio)
-  portfolio_evaluation_df = pd.DataFrame(index=metrics, columns=columns)
-  # Calculate cumulative returns:
-  portfolio_evaluation_df.loc['Cumulative Returns'] = signals_df['Portfolio Cumulative Returns'][-1]
-  # Calculate annualized returns:
-  portfolio_evaluation_df.loc['Annual Return'] = (signals_df['Portfolio Daily Returns'].mean() * 252)
-  # Calculate annual volatility:
-  portfolio_evaluation_df.loc['Annual Volatility'] = (signals_df['Portfolio Daily Returns'].std() * np.sqrt(252))
-  # Calculate Sharpe Ratio:
-  portfolio_evaluation_df.loc['Sharpe Ratio'] = (signals_df['Portfolio Daily Returns'].mean() * 252) / (signals_df['Portfolio Daily Returns'].std() * np.sqrt(252))
+## Evaluation (monthly → annualized with 12)
 
-  #Calculate Sortino Ratio/Downside Return:
-  sortino_ratio_df = signals_df[['Portfolio Daily Returns']].copy()
-  sortino_ratio_df.loc[:,'Downside Returns'] = 0
+```python
+def algo_evaluation(signals_df, periods_per_year=12):
+    ann = periods_per_year
+    out = pd.DataFrame(index=[
+        "Annual Return","Cumulative Returns","Annual Volatility","Sharpe Ratio","Sortino Ratio"
+    ], columns=["Backtest"])
 
-  target = 0
-  mask = sortino_ratio_df['Portfolio Daily Returns'] < target
-  sortino_ratio_df.loc[mask, 'Downside Returns'] = sortino_ratio_df['Portfolio Daily Returns']**2
-  down_stdev = np.sqrt(sortino_ratio_df['Downside Returns'].mean()) * np.sqrt(252)
-  expected_return = sortino_ratio_df['Portfolio Daily Returns'].mean() * 252
-  sortino_ratio = expected_return/down_stdev
+    out.loc["Cumulative Returns"] = signals_df["Cumulative_Return"].iloc[-1]
+    mean_r = signals_df["Period_Return"].mean()
+    std_r  = signals_df["Period_Return"].std()
 
-  portfolio_evaluation_df.loc['Sortino Ratio'] = sortino_ratio
+    out.loc["Annual Return"]     = mean_r * ann
+    out.loc["Annual Volatility"] = std_r * np.sqrt(ann)
+    out.loc["Sharpe Ratio"]      = (mean_r * ann) / (std_r * np.sqrt(ann)) if std_r>0 else np.nan
 
+    # Sortino (downside std)
+    dr = signals_df["Period_Return"].copy()
+    downside = dr[dr < 0]**2
+    down_stdev = np.sqrt(downside.mean()) * np.sqrt(ann) if len(downside)>0 else np.nan
+    sortino = (mean_r * ann) / down_stdev if down_stdev and down_stdev>0 else np.nan
+    out.loc["Sortino Ratio"] = sortino
 
-  return portfolio_evaluation_df
-# Generate Metrics for Algorithm:
+    return out
+
 algo_evaluation(signals_df)
-Next, I do the same for the portfolio which trades a normal long position (buy at t_0 and sell at t_n). That way I can evaluate different trading strategies in regards to the portfolio's return. 
-# Define function to evaluate the underlying asset:
-def underlying_evaluation(signals_df):
-  underlying=pd.DataFrame()
-  underlying["GOOGL_Price_EUR"]=signals_df["GOOGL_Price_EUR"]
-  underlying["Portfolio Daily Returns"]=underlying["GOOGL_Price_EUR"].pct_change()
-  underlying["Portfolio Daily Returns"].fillna(0,inplace=True)
-  underlying['Portfolio Cumulative Returns']=(1 + underlying['Portfolio Daily Returns']).cumprod() - 1
+```
 
-  underlying_evaluation=algo_evaluation(underlying)
+### Buy-and-hold comparison
 
-  return underlying_evaluation 
-# Define function to return algo evaluation relative to underlying asset combines the two evaluations into a single dataframe
-def algo_vs_underlying(signals_df):
-  metrics = [
-      'Annual Return',
-      'Cumulative Returns',
-      'Annual Volatility',
-      'Sharpe Ratio',
-      'Sortino Ratio']
+```python
+def underlying_evaluation(signals_df, periods_per_year=12):
+    u = pd.DataFrame(index=signals_df.index)
+    u["GOOGL_Price_EUR"] = signals_df["GOOGL_Price_EUR"]
+    u["Period_Return"] = u["GOOGL_Price_EUR"].pct_change().fillna(0.0)
+    u["Cumulative_Return"] = (1 + u["Period_Return"]).cumprod() - 1
+    return algo_evaluation(u.dropna(subset=["Period_Return"]), periods_per_year)
 
-  columns = ['Algo','Underlying']
-  algo=algo_evaluation(signals_df)
-  underlying=underlying_evaluation(signals_df)
+def algo_vs_underlying(signals_df, periods_per_year=12):
+    cols = ["Algo","Underlying"]
+    comp = pd.DataFrame(index=[
+        "Annual Return","Cumulative Returns","Annual Volatility","Sharpe Ratio","Sortino Ratio"
+    ], columns=cols)
+    comp["Algo"] = algo_evaluation(signals_df, periods_per_year)["Backtest"]
+    comp["Underlying"] = underlying_evaluation(signals_df, periods_per_year)["Backtest"]
+    return comp
 
-  comparison_df=pd.DataFrame(index=metrics,columns=columns)
-  comparison_df['Algo']=algo['Backtest']
-  comparison_df['Underlying']=underlying['Backtest']
-
-  return comparison_df
-
-# Generate Metrics for Function vs. Buy-and-Hold Strategy:
 algo_vs_underlying(signals_df)
-The results show that following the specified model the annual returns are significantly higher (7.5 % versus 2.2 %) which are significant gains. However, this comes at teh cost of higher volatility. Moreover, this excercise is limited in time scope, only uses monthly data and doesn't account for transaction costs from trades. 
+```
 
-# Define function which accepts daily signals dataframe and returns evaluations of individual trades:
-def trade_evaluation(signals_df):
-  
-  #initialize dataframe
-  trade_evaluation_df = pd.DataFrame(
-    columns=[
-        'Entry Date', 
-        'Exit Date', 
-        'Shares', 
-        'Entry Share Price', 
-        'Exit Share Price', 
-        'Entry Portfolio Holding', 
-        'Exit Portfolio Holding', 
-        'Profit/Loss']
-  )
-  
-  
-  entry_date = ''
-  exit_date = ''
-  entry_portfolio_holding = 0
-  exit_portfolio_holding = 0
-  share_size = 0
-  entry_share_price = 0
-  exit_share_price = 0
+---
 
-  # Loop through signal DataFrame
-  # If `Entry/Exit` is 1, set entry trade metrics
-  # Else if `Entry/Exit` is -1, set exit trade metrics and calculate profit,
-  # Then append the record to the trade evaluation DataFrame
-  for index, row in signals_df.iterrows():
-      if row['Entry/Exit'] == 1:
-          entry_date = index
-          entry_portfolio_holding = row['Portfolio Total']
-          share_size = row['Entry/Exit Position']
-          entry_share_price = row['GOOGL_Price_EUR']
-        elif row['Entry/Exit'] == -1:
-          exit_date = index
-          exit_portfolio_holding = abs(row['Portfolio Total'])
-          exit_share_price = row['GOOGL_Price_EUR']
-          profit_loss = exit_portfolio_holding - entry_portfolio_holding
-          trade_evaluation_df = trade_evaluation_df.append(
-              {
-                  'Entry Date': entry_date,
-                  'Exit Date': exit_date,
-                  'Shares': share_size,
-                  'Entry Share Price': entry_share_price,
-                  'Exit Share Price': exit_share_price,
-                  'Entry Portfolio Holding': entry_portfolio_holding,
-                  'Exit Portfolio Holding': exit_portfolio_holding,
-                  'Profit/Loss': profit_loss
-              },
-              ignore_index=True)
+## StatsModels OLS (coefs, t-stats, $R^2$)
 
-  # Print the DataFrame
-  return trade_evaluation_df
-The following test looks at the model's specific parameter (coefficients, p-tests, R^2)
-
-# Set X and y variables:
-y = combined_df.loc[:, 'GOOGL_Ret']
-X = combined_df.drop('GOOGL_Ret', axis=1)
-X = X.drop('GOOGL_Price_EUR',axis=1)
-
-# Add "Constant" column of "1s" to DataFrame to act as an intercept, using StatsModels:
+```python
+y = combined_df["GOOGL_Ret"]
+X = combined_df.drop(columns=["GOOGL_Ret","GOOGL_Price_EUR"])
 X = sm.add_constant(X)
 
-# Split into Training/Testing data:
 split = int(0.8 * len(X))
-X_train = X[: split]
-X_test = X[split:]
-y_train = y[: split]
-y_test = y[split:]
+X_train, X_test = X[:split], X[split:]
+y_train, y_test = y[:split], y[split:]
 
-# Run Ordinary Least Squares (OLS )Model:
-model = sm.OLS(y_test, X_test)
-model_results = model.fit()
-print(model_results.summary())
-# Plot Partial Regression Plot:
-fig = sm.graphics.plot_partregress_grid(model_results, fig = plt.figure(figsize=(12,8)))
+ols = sm.OLS(y_train, X_train).fit()
+print(ols.summary())
+
+# Partial regression plots (on train fit)
+fig = sm.graphics.plot_partregress_grid(ols, fig=plt.figure(figsize=(12,8)))
 plt.show()
-The followin image plots the time series of predicted cumulative results versus actual cumulative results. 
-# Define function that plots Algo Cumulative Returns vs. Underlying Cumulative Returns:
+```
+
+---
+
+## Cumulative returns plot
+
+```python
 def underlying_returns(signals_df):
-  underlying=pd.DataFrame()
-  underlying["GOOGL_Price_EUR"]=signals_df["GOOGL_Price_EUR"]
-  underlying["Underlying Daily Returns"]=underlying["GOOGL_Price_EUR"].pct_change()
-  underlying["Underlying Daily Returns"].fillna(0,inplace=True)
-  underlying['Underlying Cumulative Returns']=(1 + underlying['Underlying Daily Returns']).cumprod() - 1
-  underlying['Algo Cumulative Returns']=signals_df["Portfolio Cumulative Returns"]
+    df = pd.DataFrame(index=signals_df.index)
+    df["Underlying_Return"] = signals_df["GOOGL_Price_EUR"].pct_change().fillna(0.0)
+    df["Underlying_Cumulative"] = (1 + df["Underlying_Return"]).cumprod() - 1
+    df["Algo_Cumulative"] = signals_df["Cumulative_Return"]
+    return df[["Underlying_Cumulative","Algo_Cumulative"]]
 
-  graph_df=underlying[["Underlying Cumulative Returns", "Algo Cumulative Returns"]]
+underlying_returns(signals_df).plot(figsize=(14,6), title="Cumulative Returns: Algo vs Buy-and-Hold")
+plt.show()
+```
 
-  return graph_df
-# Generate Cumulative Return plot using above defined function:
-underlying_returns(signals_df).plot(figsize=(20,10))
+---
+
+## Notes & limitations
+
+* Data are **monthly**; annualization uses **12**.
+* Signals are **shifted** one period to avoid look-ahead.
+* **Transaction costs, slippage, taxes, borrow fees** are ignored here—add them before drawing conclusions.
+* Fama–French factors are used as **predictors**; this is a **predictive** exercise, not a causal claim.
+* Results on a single stock are noisy; consider cross-sectional tests and robustness checks (rolling windows, out-of-sample).
+
